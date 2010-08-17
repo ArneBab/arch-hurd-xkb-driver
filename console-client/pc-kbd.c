@@ -51,9 +51,6 @@ struct {
   int caps_lock : 1;
 } led_state;
 
-/* True if we are in the GNU Mach v1 compatibility mode.  */
-int gnumach_v1_compat;
-
 /* Forward declaration.  */
 static struct input_ops pc_kbd_ops;
 
@@ -439,8 +436,6 @@ char *sc_x2_to_kc[][7] =
   };
 
 
-/* GNU Mach v1 compatibility code.  */
-
 /* This is a conversion table from i8042 scancode set 1 to set 2.  */
 enum scancode sc_set1_to_set2[] =
   {
@@ -569,7 +564,7 @@ enum scancode sc_set1_to_set2_x1[] =
   };
 
 static enum scancode
-gnumach_v1_input_next ()
+input_next ()
 {
   kd_event data_buf;
   int up;
@@ -617,63 +612,13 @@ update_leds (void)
 {
   error_t err;
   
-  if (gnumach_v1_compat)
-    {
-      int led = (led_state.scroll_lock ? 1 : 0)
+  int led = (led_state.scroll_lock ? 1 : 0)
 	| (led_state.num_lock ? 2 : 0)
 	| (led_state.caps_lock ? 4 : 0);
       
-      err = device_set_status (kbd_dev, KDSETLEDS, &led, 1);
-      /* Just ignore the error, GNUMach 1.3 and older cannot set the
-	 keyboard LEDs.  */
-    }
-  else
-    {
-      char leds[2];
-      mach_msg_type_number_t data_cnt = 2;
-
-      leds[0] = '\xed';
-      leds[1] = (led_state.scroll_lock ? 1 : 0)
-	| (led_state.num_lock ? 2 : 0)
-	| (led_state.caps_lock ? 4 : 0);
-      
-      err = device_write_inband (kbd_dev, 0, -1, (void *) leds, 2, &data_cnt);
-      if (!err && data_cnt == 1)
-	err = device_write_inband (kbd_dev, 0, -1, (void *) &leds[1], 1,
-				   &data_cnt);
-    }
-}
-
-static enum scancode
-input_next ()
-{
-  enum scancode sc = 0;
-  unsigned char next;
-
-  /* GNU Mach v1 does provide keyboard input in a different format.  */
-  if (gnumach_v1_compat)
-    return gnumach_v1_input_next ();
-
-  /* XXX This should read several characters at once.  */
-  do
-    {
-      mach_msg_type_number_t data_cnt = 1;
-      error_t err = device_read_inband (kbd_dev, 0, -1, 1,
-					(void *) &next, &data_cnt);
-
-      /* XXX The error occured likely because KBD_DEV was closed, so
-	 terminate.  */
-      if (err)
-	return 0;
-
-      if (next == 0xF0)
-	/* XXX Magic constant.  */
-	sc |= SC_FLAG_UP;
-    }
-  while (next == 0xF0);	/* XXX Magic constant.  */
-
-  sc |= next;
-  return sc;
+  err = device_set_status (kbd_dev, KDSETLEDS, &led, 1);
+  /* Just ignore the error, GNUMach 1.3 and older cannot set the
+     keyboard LEDs.  */
 }
 
 
@@ -1084,6 +1029,7 @@ pc_kbd_init (void **handle, int no_exit, int argc, char *argv[], int *next)
 static error_t
 pc_kbd_start (void *handle)
 {
+  int data = KB_EVENT;
   error_t err;
   device_t device_master;
 
@@ -1098,13 +1044,7 @@ pc_kbd_start (void *handle)
       return err;
     }
 
-  err = device_open (device_master, D_READ | D_WRITE, "@>=kbd", &kbd_dev);
-  if (err == D_NO_SUCH_DEVICE)
-    {
-      /* GNU Mach v1 has a different device.  */
-      gnumach_v1_compat = 1;
-      err = device_open (device_master, D_READ, "kbd", &kbd_dev);
-    }
+  err = device_open (device_master, D_READ, "kbd", &kbd_dev);
 
   mach_port_deallocate (mach_task_self (), device_master);
   if (err)
@@ -1113,37 +1053,30 @@ pc_kbd_start (void *handle)
       return err;
     }
 
-  if (gnumach_v1_compat)
+  err = device_set_status (kbd_dev, KDSKBDMODE, &data, 1);
+  if (err)
     {
-      int data = KB_EVENT;
-      err = device_set_status (kbd_dev, KDSKBDMODE, &data, 1);
-      if (err)
-	{
-	  device_close (kbd_dev);
-	  mach_port_deallocate (mach_task_self (), kbd_dev);
-	  iconv_close (cd);
-	  return err;
-	}
+      device_close (kbd_dev);
+      mach_port_deallocate (mach_task_self (), kbd_dev);
+      iconv_close (cd);
+      return err;
     }
   update_leds ();
 
   err = driver_add_input (&pc_kbd_ops, NULL);
   if (err)
     {
-      if (gnumach_v1_compat)
-	{
-	  int data = KB_ASCII;
-	  device_set_status (kbd_dev, KDSKBDMODE, &data, 1);
-	}
+      data = KB_ASCII;
+      device_set_status (kbd_dev, KDSKBDMODE, &data, 1);
       device_close (kbd_dev);
       mach_port_deallocate (mach_task_self (), kbd_dev);
       iconv_close (cd);
       return err;
     }
-  
+
   if (repeater_node)
     kbd_setrepeater (repeater_node, &cnode);
-  
+
   cthread_detach (cthread_fork (input_loop, NULL));
 
   return 0;
@@ -1153,19 +1086,17 @@ pc_kbd_start (void *handle)
 static error_t
 pc_kbd_fini (void *handle, int force)
 {
+  int data = KB_ASCII;
+
   driver_remove_input (&pc_kbd_ops, NULL);
-  if (gnumach_v1_compat)
-    {
-      int data = KB_ASCII;
-      device_set_status (kbd_dev, KDSKBDMODE, &data, 1);
-    }
+  device_set_status (kbd_dev, KDSKBDMODE, &data, 1);
   device_close (kbd_dev);
   mach_port_deallocate (mach_task_self (), kbd_dev);
   iconv_close (cd);
 
   console_unregister_consnode (cnode);
   console_destroy_consnode (cnode);
-  
+
   return 0;
 }
 
