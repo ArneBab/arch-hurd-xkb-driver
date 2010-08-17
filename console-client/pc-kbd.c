@@ -974,8 +974,30 @@ input_loop (any_t unused)
 
 static const char doc[] = "PC Keyboard Driver";
 
+static struct arguments
+{
+  char *xkbdir;
+  char *keymapfile;
+  char *keymap;
+  char *composefile;
+  int ctrlaltbs;
+  int pos;
+} arguments = { ctrlaltbs: 1 };
+
 static const struct argp_option options[] =
   {
+    {"xkbdir", 'x', "DIR", 0,
+     "directory containing the XKB configuration files" },
+    {"keymapfile", 'f', "FILE", 0,
+     "file containing the keymap" },
+    {"keymap", 'k', "SECTIONNAME", 0,
+     "choose keymap"},
+    {"compose", 'o', "COMPOSEFILE", 0,
+     "Compose file to load (default none)"},
+    {"ctrlaltbs", 'c', 0, 0,
+     "CTRL + Alt + Backspace will exit the console client (default)."},
+    {"no-ctrlaltbs", 'n', 0 , 0,
+     "CTRL + Alt + Backspace will not exit the console client."},
     {"repeat",		'r', "NODE", OPTION_ARG_OPTIONAL,
      "Set a repeater translator on NODE (default: " DEFAULT_REPEATER_NODE ")"},
     { 0 }
@@ -984,10 +1006,34 @@ static const struct argp_option options[] =
 static error_t
 parse_opt (int key, char *arg, struct argp_state *state)
 {
-  int *pos = (int *) state->input;
+  struct arguments *arguments = state->input;
   
   switch (key)
     {
+    case 'x':
+      arguments->xkbdir = arg;
+      break;
+
+    case 'f':
+      arguments->keymapfile = arg;
+      break;
+
+    case 'k':
+      arguments->keymap = arg;
+      break;
+
+    case 'o':
+      arguments->composefile = arg;
+      break;
+
+    case 'c':
+      arguments->ctrlaltbs = 1;
+      break;
+
+    case 'n':
+      arguments->ctrlaltbs = 0;
+      break;
+
     case 'r':
       repeater_node = arg ? arg: DEFAULT_REPEATER_NODE;
       break;
@@ -999,7 +1045,7 @@ parse_opt (int key, char *arg, struct argp_state *state)
       return ARGP_ERR_UNKNOWN;
     }
 
-  *pos = state->next;
+  arguments->pos = state->next;
   return 0;
 }
 
@@ -1010,12 +1056,12 @@ static error_t
 pc_kbd_init (void **handle, int no_exit, int argc, char *argv[], int *next)
 {
   error_t err;
-  int pos = 1;
 
   /* Parse the arguments.  */
+  arguments.pos = 1;
   err = argp_parse (&argp, argc, argv, ARGP_IN_ORDER | ARGP_NO_EXIT
-		    | ARGP_SILENT, 0 , &pos);
-  *next += pos - 1;
+		    | ARGP_SILENT, 0 , &arguments);
+  *next += arguments.pos - 1;
 
   if (err && err != EINVAL)
     return err;
